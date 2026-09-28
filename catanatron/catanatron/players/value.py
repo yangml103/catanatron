@@ -8,6 +8,7 @@ from catanatron.state_functions import (
     player_num_resource_cards,
 )
 from catanatron.models.player import Player
+from catanatron.players.simulation import simulate
 from catanatron.models.enums import RESOURCES, SETTLEMENT, CITY
 from catanatron.features import (
     build_production_features,
@@ -55,12 +56,17 @@ CONTENDER_WEIGHTS = {
 
 
 def base_fn(params=DEFAULT_WEIGHTS):
+    params = {**DEFAULT_WEIGHTS, **(params or {})}
+
     def fn(game, p0_color):
         production_features = build_production_features(True)
-        our_production_sample = production_features(game, p0_color)
-        enemy_production_sample = production_features(game, p0_color)
-        production = value_production(our_production_sample, "P0")
-        enemy_production = value_production(enemy_production_sample, "P1", False)
+        production_sample = production_features(game, p0_color)
+        production = value_production(production_sample, "P0")
+        num_players = len(game.state.colors)
+        enemy_production = max(
+            value_production(production_sample, f"P{i}", False)
+            for i in range(1, num_players)
+        )
 
         key = player_key(game.state, p0_color)
         longest_road_length = get_longest_road_length(game.state, p0_color)
@@ -144,8 +150,6 @@ def contender_fn(params):
 class ValueFunctionPlayer(Player):
     """
     Player that selects the move that maximizes a heuristic value function.
-
-    For now, the base value function only considers 1 enemy player.
     """
 
     def __init__(
@@ -165,13 +169,12 @@ class ValueFunctionPlayer(Player):
         if self.epsilon is not None and random.random() < self.epsilon:
             return random.choice(playable_actions)
 
+        value_fn = get_value_fn(self.value_fn_builder_name, self.params)
         best_value = float("-inf")
         best_action = None
         for action in playable_actions:
-            game_copy = game.copy()
-            game_copy.execute(action)
+            game_copy = simulate(game, action)
 
-            value_fn = get_value_fn(self.value_fn_builder_name, self.params)
             value = value_fn(game_copy, self.color)
             if value > best_value:
                 best_value = value

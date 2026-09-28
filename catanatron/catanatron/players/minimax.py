@@ -43,9 +43,37 @@ class AlphaBetaPlayer(Player):
         self.params = params
         self.use_value_function = None
         self.epsilon = epsilon
+        self._value_fn = None
 
     def value_function(self, game, p0_color):
         raise NotImplementedError
+
+    def get_value_function(self):
+        if self._value_fn is None:
+            self._value_fn = get_value_fn(
+                self.value_fn_builder_name,
+                self.params,
+                self.value_function if self.use_value_function else None,
+            )
+        return self._value_fn
+
+    def order_actions(self, action_outcomes, maximizing, depth):
+        """Sorts actions by a 1-ply estimate, so that cutoffs happen earlier.
+
+        Only worth it when the children still have a subtree to explore;
+        at depth 1 ranking costs as much as the search itself.
+        """
+        if depth < 2 or len(action_outcomes) <= 1:
+            return action_outcomes
+
+        value_fn = self.get_value_function()
+
+        def estimate(item):
+            outcomes = item[1]
+            outcome, _ = outcomes[0]  # most likely enough to rank actions
+            return value_fn(outcome, self.color)
+
+        return dict(sorted(action_outcomes.items(), key=estimate, reverse=maximizing))
 
     def get_actions(self, game):
         if self.prunning:
@@ -91,12 +119,7 @@ class AlphaBetaPlayer(Player):
         {'value', 'action'|None if leaf, 'node' }
         """
         if depth == 0 or game.winning_color() is not None or time.time() >= deadline:
-            value_fn = get_value_fn(
-                self.value_fn_builder_name,
-                self.params,
-                self.value_function if self.use_value_function else None,
-            )
-            value = value_fn(game, self.color)
+            value = self.get_value_function()(game, self.color)
 
             node.expected_value = value
             return None, value
@@ -104,12 +127,23 @@ class AlphaBetaPlayer(Player):
         maximizingPlayer = game.state.current_color() == self.color
         actions = self.get_actions(game)  # list of actions.
         action_outcomes = expand_spectrum(game, actions)  # action => (game, proba)[]
+        action_outcomes = self.order_actions(action_outcomes, maximizingPlayer, depth)
 
         if maximizingPlayer:
             best_action = None
             best_value = float("-inf")
             for i, (action, outcomes) in enumerate(action_outcomes.items()):
                 action_node = DebugActionNode(action)
+
+                # Alpha-beta bounds are only sound for the (deterministic) value
+                # of a node. Passing them into the children of a chance node makes
+                # children return bounds instead of values, which corrupts the
+                # expectation computed here.
+                child_alpha, child_beta = (
+                    (alpha, beta)
+                    if len(outcomes) == 1
+                    else (float("-inf"), float("inf"))
+                )
 
                 expected_value = 0
                 for j, (outcome, proba) in enumerate(outcomes):
@@ -118,7 +152,7 @@ class AlphaBetaPlayer(Player):
                     )
 
                     result = self.alphabeta(
-                        outcome, depth - 1, alpha, beta, deadline, out_node
+                        outcome, depth - 1, child_alpha, child_beta, deadline, out_node
                     )
                     value = result[1]
                     expected_value += proba * value
@@ -144,6 +178,12 @@ class AlphaBetaPlayer(Player):
             for i, (action, outcomes) in enumerate(action_outcomes.items()):
                 action_node = DebugActionNode(action)
 
+                child_alpha, child_beta = (
+                    (alpha, beta)
+                    if len(outcomes) == 1
+                    else (float("-inf"), float("inf"))
+                )
+
                 expected_value = 0
                 for j, (outcome, proba) in enumerate(outcomes):
                     out_node = DebugStateNode(
@@ -151,7 +191,7 @@ class AlphaBetaPlayer(Player):
                     )
 
                     result = self.alphabeta(
-                        outcome, depth - 1, alpha, beta, deadline, out_node
+                        outcome, depth - 1, child_alpha, child_beta, deadline, out_node
                     )
                     value = result[1]
                     expected_value += proba * value
@@ -244,23 +284,23 @@ class SameTurnAlphaBetaPlayer(AlphaBetaPlayer):
             or game.winning_color() is not None
             or time.time() >= deadline
         ):
-            value_fn = get_value_fn(
-                self.value_fn_builder_name,
-                self.params,
-                self.value_function if self.use_value_function else None,
-            )
-            value = value_fn(game, self.color)
+            value = self.get_value_function()(game, self.color)
 
             node.expected_value = value
             return None, value
 
         actions = self.get_actions(game)  # list of actions.
         action_outcomes = expand_spectrum(game, actions)  # action => (game, proba)[]
+        action_outcomes = self.order_actions(action_outcomes, True, depth)
 
         best_action = None
         best_value = float("-inf")
         for i, (action, outcomes) in enumerate(action_outcomes.items()):
             action_node = DebugActionNode(action)
+
+            child_alpha, child_beta = (
+                (alpha, beta) if len(outcomes) == 1 else (float("-inf"), float("inf"))
+            )
 
             expected_value = 0
             for j, (outcome, proba) in enumerate(outcomes):
@@ -269,7 +309,7 @@ class SameTurnAlphaBetaPlayer(AlphaBetaPlayer):
                 )
 
                 result = self.alphabeta(
-                    outcome, depth - 1, alpha, beta, deadline, out_node
+                    outcome, depth - 1, child_alpha, child_beta, deadline, out_node
                 )
                 value = result[1]
                 expected_value += proba * value
