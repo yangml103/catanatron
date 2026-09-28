@@ -19,6 +19,7 @@ from catanatron.state_functions import (
     get_enemy_colors,
 )
 from catanatron.features import build_production_features
+from catanatron.players.simulation import simulate
 from catanatron.players.value import value_production
 
 DETERMINISTIC_ACTIONS = set(
@@ -38,9 +39,7 @@ DETERMINISTIC_ACTIONS = set(
 
 
 def execute_deterministic(game, action):
-    copy = game.copy()
-    copy.execute(action, validate_action=False)
-    return [(copy, 1)]
+    return [(simulate(game, action), 1)]
 
 
 def execute_spectrum(game: Game, action: Action):
@@ -59,11 +58,11 @@ def execute_spectrum(game: Game, action: Action):
                 number = get_dev_cards_in_hand(game.state, color, card)
                 current_deck += [card] * number
 
-        for card in set(current_deck):
+        for card in sorted(set(current_deck), key=str):
             option_action = Action(action.color, action.action_type, card)
             option_game = game.copy()
             try:
-                option_game.execute(option_action, validate_action=False)
+                option_game = simulate(game, option_action)
             except Exception:
                 # ignore exceptions, since player might imagine impossible outcomes.
                 # ignoring means the value function of this node will be flattened,
@@ -77,8 +76,7 @@ def execute_spectrum(game: Game, action: Action):
             outcome = (roll // 2, math.ceil(roll / 2))
 
             option_action = Action(action.color, action.action_type, outcome)
-            option_game = game.copy()
-            option_game.execute(option_action, validate_action=False)
+            option_game = simulate(game, option_action)
             results.append((option_game, number_probability(roll)))
         return results
     elif action.action_type == ActionType.MOVE_ROBBER:
@@ -102,10 +100,8 @@ def execute_spectrum(game: Game, action: Action):
             option_action_record = ActionRecord(action=option_action, result=card)
             option_game = game.copy()
             try:
-                option_game.execute(
-                    option_action,
-                    validate_action=False,
-                    action_record=option_action_record,
+                option_game = simulate(
+                    game, option_action, action_record=option_action_record
                 )
             except Exception:
                 # ignore exceptions, since player might imagine impossible outcomes.
@@ -164,12 +160,13 @@ def list_prunned_actions(game: Game):
 
 def prune_robber_actions(current_color, game, actions):
     """Eliminate all but the most impactful tile"""
-    enemy_color = next(filter(lambda c: c != current_color, game.state.colors))
+    actions = list(actions)
     enemy_owned_tiles = set()
-    for node_id in get_player_buildings(game.state, enemy_color, SETTLEMENT):
-        enemy_owned_tiles.update(game.state.board.map.adjacent_tiles[node_id])
-    for node_id in get_player_buildings(game.state, enemy_color, CITY):
-        enemy_owned_tiles.update(game.state.board.map.adjacent_tiles[node_id])
+    for enemy_color in get_enemy_colors(game.state.colors, current_color):
+        for node_id in get_player_buildings(game.state, enemy_color, SETTLEMENT):
+            enemy_owned_tiles.update(game.state.board.map.adjacent_tiles[node_id])
+        for node_id in get_player_buildings(game.state, enemy_color, CITY):
+            enemy_owned_tiles.update(game.state.board.map.adjacent_tiles[node_id])
 
     robber_moves = set(
         filter(
@@ -178,23 +175,27 @@ def prune_robber_actions(current_color, game, actions):
             actions,
         )
     )
+    if len(robber_moves) == 0:
+        return actions
 
     production_features = build_production_features(True)
+    num_players = len(game.state.colors)
 
     def impact(action):
-        game_copy = game.copy()
-        game_copy.execute(action)
+        game_copy = simulate(game, action)
 
-        our_production_sample = production_features(game_copy, current_color)
-        enemy_production_sample = production_features(game_copy, current_color)
-        production = value_production(our_production_sample, "P0")
-        enemy_production = value_production(enemy_production_sample, "P1")
+        production_sample = production_features(game_copy, current_color)
+        production = value_production(production_sample, "P0")
+        enemy_production = max(
+            value_production(production_sample, f"P{i}", False)
+            for i in range(1, num_players)
+        )
 
         return enemy_production - production
 
-    most_impactful_robber_action = max(
+    most_impactful_robber_action = min(
         robber_moves, key=impact
-    )  # most production and variety producing
+    )  # leaves enemies with the least production relative to ours
     actions = filter(
         lambda a: a.action_type != ActionType.MOVE_ROBBER
         or a == most_impactful_robber_action,
